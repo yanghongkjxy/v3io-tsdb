@@ -26,6 +26,8 @@ import (
 	"os"
 )
 
+const DEFAULT_CFG_FILE_NAME = "v3io.yaml"
+
 type V3ioConfig struct {
 	// V3IO Connection details: Url, Data container, relative path for this dataset, credentials
 	V3ioUrl   string `json:"v3ioUrl"`
@@ -36,10 +38,12 @@ type V3ioConfig struct {
 
 	// Disable is use in Prometheus to disable v3io and work with the internal TSDB
 	Disabled bool `json:"disabled,omitempty"`
-	// True will turn on Debug mode
-	Verbose bool `json:"verbose,omitempty"`
+	// Set logging level: debug | info | warn | error (info by default)
+	Verbose string `json:"verbose,omitempty"`
 	// Number of parallel V3IO worker routines
 	Workers int `json:"workers"`
+	// Number of parallel V3IO worker routines for queries (default is min between 8 and Workers)
+	QryWorkers int `json:"qryWorkers"`
 	// Max uncommitted (delayed) samples allowed per metric
 	MaxBehind int `json:"maxBehind"`
 	// Override last chunk (by default on restart it will append from the last point if possible)
@@ -96,9 +100,13 @@ type MetricConfig struct {
 
 func LoadConfig(path string) (*V3ioConfig, error) {
 
-	envpath := os.Getenv("V3IO-COLDB-CFG")
+	envpath := os.Getenv("V3IO_TSDBCFG_PATH")
 	if envpath != "" {
 		path = envpath
+	}
+
+	if path == "" {
+		path = DEFAULT_CFG_FILE_NAME
 	}
 
 	data, err := ioutil.ReadFile(path)
@@ -113,14 +121,23 @@ func LoadFromData(data []byte) (*V3ioConfig, error) {
 	cfg := V3ioConfig{}
 	err := yaml.Unmarshal(data, &cfg)
 
-	initDefaults(&cfg)
+	InitDefaults(&cfg)
 
 	return &cfg, err
 }
 
-func initDefaults(cfg *V3ioConfig) {
-	// Initialize defaults
+func InitDefaults(cfg *V3ioConfig) {
+	// Initialize default number of workers
 	if cfg.Workers == 0 {
 		cfg.Workers = 8
+	}
+
+	// init default number Query workers if not set to Min(8,Workers)
+	if cfg.QryWorkers == 0 {
+		if cfg.Workers < 8 {
+			cfg.QryWorkers = cfg.Workers
+		} else {
+			cfg.QryWorkers = 8
+		}
 	}
 }

@@ -33,8 +33,13 @@ import (
 //const basetime = 1524690488000
 var basetime int64
 
-func TestTsdb(t *testing.T) {
-	basetime = time.Now().Unix() * 1000
+func TestTsdbIntegration(t *testing.T) {
+
+	if testing.Short() {
+		t.Skip("Skipping integration test.")
+	}
+
+	basetime = time.Now().Unix()*1000 - 3600000 // now - 1hr
 
 	d, h := partmgr.TimeToDHM(basetime)
 	fmt.Println("base=", d, h)
@@ -56,23 +61,22 @@ func TestTsdb(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	lset := utils.Labels{utils.Label{Name: "__name__", Value: "http_req"},
-		utils.Label{Name: "method", Value: "post"}}
+	lset := utils.FromStrings("__name__", "http_req", "method", "post")
 
 	err = DoAppend(lset, appender, 50, 30)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	//time.Sleep(time.Second * 5)
+	time.Sleep(time.Second * 2)
 	//return
 
-	qry, err := adapter.Querier(nil, basetime-2*3600*1000, basetime)
+	qry, err := adapter.Querier(nil, basetime-6*3600*1000, basetime+2*3600*1000)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	set, err := qry.Select("", 0, "_name=='http_req'")
+	set, err := qry.Select("http_req", "", 0, "")
 	//set, err := qry.Select("count,avg,sum", 1000*3600, "_name=='http_req'")
 	//set, err := qry.SelectOverlap("count,avg,sum,max", 1000*3600, []int{4, 2, 1}, "_name=='http_req'")
 	if err != nil {
@@ -91,10 +95,6 @@ func TestTsdb(t *testing.T) {
 		//iter.Seek(basetime-1*3600*1000)
 		for iter.Next() {
 
-			if iter.Err() != nil {
-				t.Fatal(iter.Err())
-			}
-
 			t, v := iter.At()
 			d, h := partmgr.TimeToDHM(t)
 			if h != lasth {
@@ -104,13 +104,17 @@ func TestTsdb(t *testing.T) {
 			fmt.Printf("t=%d:%d:%d,v=%.2f ", d, h, m, v)
 			lasth = h
 		}
+		if iter.Err() != nil {
+			t.Fatal(iter.Err())
+		}
+
 		fmt.Println()
 	}
 
 }
 
 func DoAppend(lset utils.Labels, app Appender, num, interval int) error {
-	//return nil
+	return nil
 	//time.Sleep(time.Second * 1)
 	curTime := int64(basetime)
 

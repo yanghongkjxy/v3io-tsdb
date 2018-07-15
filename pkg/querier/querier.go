@@ -26,6 +26,7 @@ import (
 	"github.com/v3io/v3io-tsdb/config"
 	"github.com/v3io/v3io-tsdb/pkg/aggregate"
 	"github.com/v3io/v3io-tsdb/pkg/partmgr"
+	"github.com/v3io/v3io-tsdb/pkg/utils"
 	"sort"
 	"strings"
 )
@@ -40,31 +41,28 @@ func NewV3ioQuerier(container *v3io.Container, logger logger.Logger, mint, maxt 
 }
 
 type V3ioQuerier struct {
-	logger     logger.Logger
-	container  *v3io.Container
-	cfg        *config.V3ioConfig
-	mint, maxt int64
-	//Keymap        *map[string]bool // link to Appender metric names, TODO: use queries instead
+	logger        logger.Logger
+	container     *v3io.Container
+	cfg           *config.V3ioConfig
+	mint, maxt    int64
 	partitionMngr *partmgr.PartitionManager
 	overlapWin    []int
 }
 
 // Standard Time Series Query, return a set of series which match the condition
-func (q *V3ioQuerier) Select(functions string, step int64, filter string) (SeriesSet, error) {
-	return q.selectQry(functions, step, nil, filter)
+func (q *V3ioQuerier) Select(name, functions string, step int64, filter string) (SeriesSet, error) {
+	return q.selectQry(name, functions, step, nil, filter)
 }
 
 // Overlapping windows Time Series Query, return a set of series each with a list of aggregated results per window
 // e.g. get the last 1hr, 6hr, 24hr stats per metric (specify a 1hr step of 3600*1000, 1,6,24 windows, and max time)
-func (q *V3ioQuerier) SelectOverlap(functions string, step int64, win []int, filter string) (SeriesSet, error) {
+func (q *V3ioQuerier) SelectOverlap(name, functions string, step int64, win []int, filter string) (SeriesSet, error) {
 	sort.Sort(sort.Reverse(sort.IntSlice(win)))
-	return q.selectQry(functions, step, win, filter)
+	return q.selectQry(name, functions, step, win, filter)
 }
 
 // base query function
-func (q *V3ioQuerier) selectQry(functions string, step int64, win []int, filter string) (SeriesSet, error) {
-
-	// TODO: use special match for aggregates (allow to flexible qry from Prom)
+func (q *V3ioQuerier) selectQry(name, functions string, step int64, win []int, filter string) (SeriesSet, error) {
 
 	filter = strings.Replace(filter, "__name__", "_name", -1)
 	q.logger.DebugWith("Select query", "func", functions, "step", step, "filter", filter)
@@ -73,7 +71,7 @@ func (q *V3ioQuerier) selectQry(functions string, step int64, win []int, filter 
 	if q.partitionMngr.IsCyclic() {
 		partition := q.partitionMngr.GetHead()
 		mint = partition.CyclicMinTime(mint, maxt)
-		q.logger.DebugWith("Select - new cyclic series", "from", mint, "to", maxt, "filter", filter)
+		q.logger.DebugWith("Select - new cyclic series", "from", mint, "to", maxt, "name", name, "filter", filter)
 		newSet := &V3ioSeriesSet{mint: mint, maxt: maxt, partition: partition, logger: q.logger}
 
 		if functions != "" && step == 0 && partition.RollupTime() != 0 {
@@ -93,7 +91,7 @@ func (q *V3ioQuerier) selectQry(functions string, step int64, win []int, filter 
 			newSet.overlapWin = q.overlapWin
 		}
 
-		err = newSet.getItems(partition.GetPath(), filter, q.container)
+		err = newSet.getItems(partition.GetPath(), name, filter, q.container, q.cfg.QryWorkers)
 		if err != nil {
 			return nil, err
 		}
@@ -109,7 +107,7 @@ func (q *V3ioQuerier) selectQry(functions string, step int64, win []int, filter 
 	return nullSeriesSet{}, nil
 }
 
-// return the current metric names, TODO: read from DB vs from local cache
+// return the current metric names
 func (q *V3ioQuerier) LabelValues(name string) ([]string, error) {
 	list := []string{}
 	//for k, _ := range *q.Keymap {
@@ -117,7 +115,8 @@ func (q *V3ioQuerier) LabelValues(name string) ([]string, error) {
 	//}
 
 	input := v3io.GetItemsInput{Path: q.cfg.Path + "/names/", AttributeNames: []string{"__name"}, Filter: ""}
-	iter, err := q.container.Sync.GetItemsCursor(&input)
+	//iter, err := q.container.Sync.GetItemsCursor(&input)
+	iter, err := utils.NewAsyncItemsCursor(q.container, &input, q.cfg.QryWorkers)
 	q.logger.DebugWith("GetItems to read names", "input", input, "err", err)
 	if err != nil {
 		return list, err
@@ -128,7 +127,10 @@ func (q *V3ioQuerier) LabelValues(name string) ([]string, error) {
 		list = append(list, name)
 	}
 
-	return list, iter.Err()
+	if iter.Err() != nil {
+		q.logger.InfoWith("Failed to read names, assume empty list", "err", iter.Err().Error())
+	}
+	return list, nil
 }
 
 func (q *V3ioQuerier) Close() error {
@@ -145,7 +147,7 @@ type V3ioSeriesSet struct {
 	err        error
 	logger     logger.Logger
 	partition  *partmgr.DBPartition
-	iter       *v3io.SyncItemsCursor //*utils.V3ioItemsCursor
+	iter       utils.ItemsCursor //*v3io.SyncItemsCursor
 	mint, maxt int64
 	attrs      []string
 	chunkIds   []int
@@ -162,7 +164,7 @@ type V3ioSeriesSet struct {
 
 // Get relevant items & attributes from the DB, and create an iterator
 // TODO: get items per partition + merge, per partition calc attrs
-func (s *V3ioSeriesSet) getItems(path, filter string, container *v3io.Container) error {
+func (s *V3ioSeriesSet) getItems(path, name, filter string, container *v3io.Container, workers int) error {
 
 	attrs := []string{"_lset", "_meta", "_name", "_maxtime"}
 
@@ -173,9 +175,10 @@ func (s *V3ioSeriesSet) getItems(path, filter string, container *v3io.Container)
 	}
 	attrs = append(attrs, s.attrs...)
 
-	s.logger.DebugWith("Select - GetItems", "path", path, "attr", attrs, "filter", filter)
-	input := v3io.GetItemsInput{Path: path, AttributeNames: attrs, Filter: filter}
-	iter, err := container.Sync.GetItemsCursor(&input)
+	s.logger.DebugWith("Select - GetItems", "path", path, "attr", attrs, "filter", filter, "name", name)
+	input := v3io.GetItemsInput{Path: path, AttributeNames: attrs, Filter: filter, ShardingKey: name}
+	//iter, err := container.Sync.GetItemsCursor(&input)
+	iter, err := utils.NewAsyncItemsCursor(container, &input, workers)
 	//iter, err := utils.NewItemsCursor(container, &input)
 	if err != nil {
 		return err
@@ -209,26 +212,28 @@ func (s *V3ioSeriesSet) Next() bool {
 		if s.aggrSeries.CanAggregate(s.partition.AggrType()) && s.maxt-s.mint > s.interval {
 
 			// create series from aggregation arrays (in DB) if the partition stored the desired aggregates
-			maxt := s.maxt
+			maxtUpdate := s.maxt
 			maxTime := s.iter.GetField("_maxtime")
-			if maxTime != nil && int64(maxTime.(int)) < maxt {
-				maxt = int64(maxTime.(int))
+			if maxTime != nil && int64(maxTime.(int)) < s.maxt {
+				maxtUpdate = int64(maxTime.(int))
 			}
-			mint := s.partition.CyclicMinTime(s.mint, maxt)
+			mint := s.partition.CyclicMinTime(s.mint, maxtUpdate)
 
 			start := s.partition.Time2Bucket(mint)
-			end := s.partition.Time2Bucket(maxt)
-			length := int((maxt - mint) / s.interval)
+			end := s.partition.Time2Bucket(s.maxt + s.interval)
+
+			// len of the returned array, cropped at the end in case of cyclic overlap
+			length := int((maxtUpdate-mint)/s.interval) + 2
 
 			if s.overlapWin != nil {
-				s.baseTime = maxt //- int64(s.overlapWin[0]) * s.interval
+				s.baseTime = s.maxt //- int64(s.overlapWin[0]) * s.interval
 			} else {
 				s.baseTime = mint
 			}
 
-			if length != 0 {
+			if length > 0 {
 				attrs := s.iter.GetFields()
-				aggrSet, err := s.aggrSeries.NewSetFromAttrs(length, start, end, mint, maxt, &attrs)
+				aggrSet, err := s.aggrSeries.NewSetFromAttrs(length, start, end, mint, s.maxt, &attrs)
 				if err != nil {
 					s.err = err
 					return false

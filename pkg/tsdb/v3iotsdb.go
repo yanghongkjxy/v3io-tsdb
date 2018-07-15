@@ -36,6 +36,7 @@ import (
 )
 
 const DB_VERSION = "1.0"
+const DB_CONFIG_PATH = "/dbconfig.json"
 
 type V3ioAdapter struct {
 	startTimeMargin int64
@@ -49,7 +50,8 @@ type V3ioAdapter struct {
 func CreateTSDB(v3iocfg *config.V3ioConfig, dbconfig *config.DBPartConfig) error {
 
 	logger, _ := utils.NewLogger(v3iocfg.Verbose)
-	container, err := utils.CreateContainer(logger, v3iocfg.V3ioUrl, v3iocfg.Container, v3iocfg.Workers)
+	container, err := utils.CreateContainer(
+		logger, v3iocfg.V3ioUrl, v3iocfg.Container, v3iocfg.Username, v3iocfg.Password, v3iocfg.Workers)
 	if err != nil {
 		return errors.Wrap(err, "Failed to create data container")
 	}
@@ -63,12 +65,12 @@ func CreateTSDB(v3iocfg *config.V3ioConfig, dbconfig *config.DBPartConfig) error
 	}
 
 	// check if the config file already exist, abort if it does
-	_, err = container.Sync.GetObject(&v3io.GetObjectInput{Path: v3iocfg.Path + "/dbconfig.json"})
+	_, err = container.Sync.GetObject(&v3io.GetObjectInput{Path: v3iocfg.Path + DB_CONFIG_PATH})
 	if err == nil {
 		return fmt.Errorf("TSDB already exist in path: " + v3iocfg.Path)
 	}
 
-	err = container.Sync.PutObject(&v3io.PutObjectInput{Path: v3iocfg.Path + "/dbconfig.json", Body: data})
+	err = container.Sync.PutObject(&v3io.PutObjectInput{Path: v3iocfg.Path + DB_CONFIG_PATH, Body: data})
 
 	return err
 }
@@ -93,7 +95,7 @@ func NewV3ioAdapter(cfg *config.V3ioConfig, container *v3io.Container, logger lo
 		newV3ioAdapter.container = container
 	} else {
 		newV3ioAdapter.container, err = utils.CreateContainer(newV3ioAdapter.logger,
-			cfg.V3ioUrl, cfg.Container, cfg.Workers)
+			cfg.V3ioUrl, cfg.Container, cfg.Username, cfg.Password, cfg.Workers)
 		if err != nil {
 			return nil, errors.Wrap(err, "Failed to create V3IO data container")
 		}
@@ -106,6 +108,14 @@ func NewV3ioAdapter(cfg *config.V3ioConfig, container *v3io.Container, logger lo
 
 func (a *V3ioAdapter) GetDBConfig() *config.DBPartConfig {
 	return a.partitionMngr.GetConfig()
+}
+
+func (a *V3ioAdapter) GetLogger(child string) logger.Logger {
+	return a.logger.GetChild(child)
+}
+
+func (a *V3ioAdapter) GetContainer() (*v3io.Container, string) {
+	return a.container, a.cfg.Path
 }
 
 func (a *V3ioAdapter) connect() error {
@@ -133,7 +143,6 @@ func (a *V3ioAdapter) connect() error {
 	}
 
 	msg := "Starting V3IO TSDB client, server is at : " + fullpath
-	fmt.Printf("\n%s\n\n", msg)
 	a.logger.Info(msg)
 
 	a.MetricsCache = appender.NewMetricsCache(a.container, a.logger, a.cfg, a.partitionMngr)
@@ -154,7 +163,7 @@ func (a *V3ioAdapter) Appender() (Appender, error) {
 
 func (a *V3ioAdapter) StartTime() (int64, error) {
 	startTime := int64(time.Now().Unix() * 1000)
-	return startTime + a.startTimeMargin, nil
+	return startTime - 1000*3600*24*1000, nil // TODO: from config or DB w default
 }
 
 func (a *V3ioAdapter) Close() error {
@@ -164,6 +173,59 @@ func (a *V3ioAdapter) Close() error {
 // create a querier interface, used for time series queries
 func (a *V3ioAdapter) Querier(_ context.Context, mint, maxt int64) (*querier.V3ioQuerier, error) {
 	return querier.NewV3ioQuerier(a.container, a.logger, mint, maxt, a.cfg, a.partitionMngr), nil
+}
+
+func (a *V3ioAdapter) DeleteDB(config bool, force bool) error {
+
+	path := a.partitionMngr.GetHead().GetPath()
+	a.logger.Info("Delete partition %s", path)
+	err := utils.DeleteTable(a.container, path, "", a.cfg.QryWorkers)
+	if err != nil && !force {
+		return err
+	}
+	// delete the Directory object
+	a.container.Sync.DeleteObject(&v3io.DeleteObjectInput{Path: path})
+
+	path = a.cfg.Path + "/names/"
+	a.logger.Info("Delete metric names in path %s", path)
+	err = utils.DeleteTable(a.container, path, "", a.cfg.QryWorkers)
+	if err != nil && !force {
+		return err
+	}
+	// delete the Directory object
+	a.container.Sync.DeleteObject(&v3io.DeleteObjectInput{Path: path})
+
+	if config {
+		a.logger.Info("Delete TSDB config in path %s", a.cfg.Path+DB_CONFIG_PATH)
+		err = a.container.Sync.DeleteObject(&v3io.DeleteObjectInput{Path: a.cfg.Path + DB_CONFIG_PATH})
+		if err != nil && !force {
+			return errors.New("Cant delete config or not found in " + a.cfg.Path + DB_CONFIG_PATH)
+		}
+		// delete the Directory object
+		a.container.Sync.DeleteObject(&v3io.DeleteObjectInput{Path: a.cfg.Path + "/"})
+	}
+
+	return nil
+}
+
+// return number of objects in a table
+func (a *V3ioAdapter) CountMetrics(part string) (int, error) {
+
+	input := v3io.GetItemsInput{Path: a.partitionMngr.GetHead().GetPath(), AttributeNames: []string{"__size"}}
+	iter, err := utils.NewAsyncItemsCursor(a.container, &input, a.cfg.QryWorkers)
+	if err != nil {
+		return 0, err
+	}
+
+	count := 0
+	for iter.Next() {
+		count++
+	}
+	if iter.Err() != nil {
+		return count, errors.Wrap(iter.Err(), "failed on count iterator")
+	}
+
+	return count, nil
 }
 
 type v3ioAppender struct {

@@ -22,19 +22,29 @@ package utils
 
 import (
 	"encoding/binary"
+	"fmt"
 	"github.com/nuclio/logger"
 	"github.com/nuclio/zap"
 	"github.com/pkg/errors"
 	"github.com/v3io/v3io-go-http"
+	"time"
 )
 
-func NewLogger(verbose bool) (logger.Logger, error) {
+func NewLogger(verbose string) (logger.Logger, error) {
 	var logLevel nucliozap.Level
-	if verbose {
+	switch verbose {
+	case "debug":
 		logLevel = nucliozap.DebugLevel
-	} else {
+	case "info":
+		logLevel = nucliozap.InfoLevel
+	case "warn":
 		logLevel = nucliozap.WarnLevel
+	case "error":
+		logLevel = nucliozap.ErrorLevel
+	default:
+		logLevel = nucliozap.InfoLevel
 	}
+
 	log, err := nucliozap.NewNuclioZapCmd("v3io-prom", logLevel)
 	if err != nil {
 		return nil, err
@@ -42,7 +52,7 @@ func NewLogger(verbose bool) (logger.Logger, error) {
 	return log, nil
 }
 
-func CreateContainer(logger logger.Logger, addr, cont string, workers int) (*v3io.Container, error) {
+func CreateContainer(logger logger.Logger, addr, cont, username, password string, workers int) (*v3io.Container, error) {
 	// create context
 	context, err := v3io.NewContext(logger, addr, workers)
 	if err != nil {
@@ -50,7 +60,7 @@ func CreateContainer(logger logger.Logger, addr, cont string, workers int) (*v3i
 	}
 
 	// create session
-	session, err := context.NewSession("", "", "v3test")
+	session, err := context.NewSession(username, password, "v3test")
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to create session")
 	}
@@ -73,4 +83,78 @@ func AsInt64Array(val []byte) []uint64 {
 		array = append(array, val)
 	}
 	return array
+}
+
+func DeleteTable(container *v3io.Container, path, filter string, workers int) error {
+
+	input := v3io.GetItemsInput{Path: path, AttributeNames: []string{"__name"}, Filter: filter}
+	iter, err := NewAsyncItemsCursor(container, &input, workers)
+	//iter, err := container.Sync.GetItemsCursor(&input)
+	if err != nil {
+		return err
+	}
+
+	responseChan := make(chan *v3io.Response, 1000)
+	commChan := make(chan int, 2)
+	doneChan := respWaitLoop(commChan, responseChan, 10*time.Second)
+	reqMap := map[uint64]bool{}
+
+	i := 0
+	for iter.Next() {
+		name := iter.GetField("__name").(string)
+		req, err := container.DeleteObject(&v3io.DeleteObjectInput{Path: path + "/" + name}, nil, responseChan)
+		if err != nil {
+			commChan <- i
+			return errors.Wrap(err, "failed to delete object "+name)
+		}
+		reqMap[req.ID] = true
+		i++
+	}
+
+	commChan <- i
+	if iter.Err() != nil {
+		return errors.Wrap(iter.Err(), "failed to delete object ")
+	}
+
+	<-doneChan
+
+	return nil
+}
+
+func respWaitLoop(comm chan int, responseChan chan *v3io.Response, timeout time.Duration) chan bool {
+	responses := 0
+	requests := -1
+	done := make(chan bool)
+
+	go func() {
+		for {
+			select {
+
+			case resp := <-responseChan:
+				responses++
+				if resp.Error != nil {
+					fmt.Println(resp.Error, "failed Delete response")
+				}
+
+				if requests == responses {
+					fmt.Println()
+					done <- true
+					return
+				}
+
+			case requests = <-comm:
+				if requests <= responses {
+					done <- true
+					return
+				}
+
+			case <-time.After(timeout):
+				fmt.Println("\nResp loop timed out! ", requests, responses)
+				done <- true
+				return
+			}
+		}
+	}()
+
+	return done
 }

@@ -1,11 +1,31 @@
+/*
+Copyright 2018 Iguazio Systems Ltd.
+
+Licensed under the Apache License, Version 2.0 (the "License") with
+an addition restriction as set forth herein. You may not use this
+file except in compliance with the License. You may obtain a copy of
+the License at http://www.apache.org/licenses/LICENSE-2.0.
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+implied. See the License for the specific language governing
+permissions and limitations under the License.
+
+In addition, you may not use the software for any purposes that are
+illegal under applicable law, and the grant of the foregoing license
+under the Apache 2.0 license is conditioned upon your compliance with
+such restriction.
+*/
+
 package tsdbctl
 
 import (
 	"os"
 
-	"github.com/nuclio/nuclio/pkg/errors"
-
 	"fmt"
+	"github.com/nuclio/logger"
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/cobra/doc"
 	"github.com/v3io/v3io-tsdb/config"
@@ -15,12 +35,13 @@ import (
 
 type RootCommandeer struct {
 	adapter     *tsdb.V3ioAdapter
+	logger      logger.Logger
 	v3iocfg     *config.V3ioConfig
 	cmd         *cobra.Command
 	v3ioPath    string
 	dbPath      string
 	cfgFilePath string
-	verbose     bool
+	verbose     string
 }
 
 func NewRootCommandeer() *RootCommandeer {
@@ -29,21 +50,15 @@ func NewRootCommandeer() *RootCommandeer {
 	cmd := &cobra.Command{
 		Use:   "tsdbctl [command]",
 		Short: "V3IO TSDB command-line interface",
-		//SilenceUsage:  true,
-		//SilenceErrors: true,
 	}
 
 	defaultV3ioServer := os.Getenv("V3IO_SERVICE_URL")
 
-	defaultCfgPath := os.Getenv("V3IO_FILE_PATH")
-	if defaultCfgPath == "" {
-		defaultCfgPath = "v3io.yaml"
-	}
-
-	cmd.PersistentFlags().BoolVarP(&commandeer.verbose, "verbose", "v", false, "Verbose output")
+	cmd.PersistentFlags().StringVarP(&commandeer.verbose, "verbose", "v", "", "Verbose output")
+	cmd.PersistentFlags().Lookup("verbose").NoOptDefVal = "debug"
 	cmd.PersistentFlags().StringVarP(&commandeer.dbPath, "dbpath", "p", "", "sub path for the TSDB, inside the container")
-	cmd.PersistentFlags().StringVarP(&commandeer.v3ioPath, "server", "s", defaultV3ioServer, "V3IO Service URL - ip:port/container")
-	cmd.PersistentFlags().StringVarP(&commandeer.cfgFilePath, "config", "c", defaultCfgPath, "path to yaml config file")
+	cmd.PersistentFlags().StringVarP(&commandeer.v3ioPath, "server", "s", defaultV3ioServer, "V3IO Service URL - username:password@ip:port/container")
+	cmd.PersistentFlags().StringVarP(&commandeer.cfgFilePath, "config", "c", "", "path to yaml config file")
 
 	// add children
 	cmd.AddCommand(
@@ -52,6 +67,8 @@ func NewRootCommandeer() *RootCommandeer {
 		newTimeCommandeer(commandeer).cmd,
 		newCreateCommandeer(commandeer).cmd,
 		newInfoCommandeer(commandeer).cmd,
+		newDeleteCommandeer(commandeer).cmd,
+		newCheckCommandeer(commandeer).cmd,
 	)
 
 	commandeer.cmd = cmd
@@ -75,17 +92,29 @@ func (rc *RootCommandeer) CreateMarkdown(path string) error {
 }
 
 func (rc *RootCommandeer) initialize() error {
-	var err error
-	cfg := &config.V3ioConfig{}
 
-	if rc.cfgFilePath != "" {
-		cfg, err = config.LoadConfig(rc.cfgFilePath)
-		if err != nil {
+	cfg, err := config.LoadConfig(rc.cfgFilePath)
+	if err != nil {
+		// if we couldn't load the file and its not the default
+		if rc.cfgFilePath != "" {
 			return errors.Wrap(err, "Failed to load config from file "+rc.cfgFilePath)
 		}
+		cfg = &config.V3ioConfig{} // initialize struct, will try and set it from individual flags
+		config.InitDefaults(cfg)
 	}
 
 	if rc.v3ioPath != "" {
+
+		// read username and password
+		if i := strings.Index(rc.v3ioPath, "@"); i > 0 {
+			cfg.Username = rc.v3ioPath[0:i]
+			rc.v3ioPath = rc.v3ioPath[i+1:]
+			if userpass := strings.Split(cfg.Username, ":"); len(userpass) > 1 {
+				cfg.Username = userpass[0]
+				cfg.Password = userpass[1]
+			}
+		}
+
 		slash := strings.LastIndex(rc.v3ioPath, "/")
 		if slash == -1 || len(rc.v3ioPath) <= slash+1 {
 			return fmt.Errorf("missing container name in V3IO URL")
@@ -99,7 +128,11 @@ func (rc *RootCommandeer) initialize() error {
 	}
 
 	if cfg.V3ioUrl == "" || cfg.Container == "" || cfg.Path == "" {
-		return fmt.Errorf("User must provide V3IO URL, container name, and table path via the confif file or flags")
+		return fmt.Errorf("User must provide V3IO URL, container name, and table path via the config file or flags")
+	}
+
+	if rc.verbose != "" {
+		cfg.Verbose = rc.verbose
 	}
 
 	rc.v3iocfg = cfg
@@ -112,6 +145,8 @@ func (rc *RootCommandeer) startAdapter() error {
 	if err != nil {
 		return errors.Wrap(err, "Failed to start TSDB Adapter")
 	}
+
+	rc.logger = rc.adapter.GetLogger("cli")
 
 	return nil
 

@@ -54,7 +54,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 package chunkenc
 
 import (
-	"fmt"
 	"math"
 	"math/bits"
 )
@@ -88,34 +87,6 @@ func (c *XORChunk) Clear() {
 	c.b.clear()
 }
 
-// GetMeta returns offset, samples, length, bits, encoding
-func (c *XORChunk) GetMeta() (uint16, uint16, uint16, uint8, uint8) {
-	return 0, c.samples, 0, c.b.count, 1
-}
-
-// GetMeta returns offset, samples, length, bits, encoding
-func (c *XORChunk) GetChunkBuffer() (uint64, int, []byte) {
-	bytes := c.b.bytes()
-	meta := toMetadata(c.samples, 0, 0, c.b.count, 1)
-	return meta, 0, bytes
-}
-
-// MoveOffset removes first bytes that were committed to storage.
-func (c *XORChunk) MoveOffset(num uint16) error {
-
-	if num >= 0 {
-		return fmt.Errorf("Read pointer passed write pointer in byte stream ring")
-	}
-
-	//c.b.rptr = num
-	return nil
-}
-
-// NumSamples returns the number of samples in the chunk.
-func (c *XORChunk) NumSamples() int {
-	return int(c.samples)
-}
-
 // Appender implements the Chunk interface.
 // new implementation, doesnt read the existing buffer, assume its new
 func (c *XORChunk) Appender() (Appender, error) {
@@ -126,7 +97,7 @@ func (c *XORChunk) Appender() (Appender, error) {
 	return a, nil
 }
 
-// old Appender TODO: do we need to append to existing bugger? maybe in stateless/slow clients
+/* old Appender TODO: do we need to append to existing buffer? maybe in stateless/slow clients
 func (c *XORChunk) aAppender() (Appender, error) {
 	it := c.iterator()
 
@@ -154,6 +125,7 @@ func (c *XORChunk) aAppender() (Appender, error) {
 	}
 	return a, nil
 }
+*/
 
 func (c *XORChunk) iterator() *xorIterator {
 	// Should iterators guarantee to act on a copy of the data so it doesn't lock append?
@@ -234,7 +206,7 @@ func (a *xorAppender) Append(t int64, v float64) {
 	(*a.samples)++
 	a.tDelta = tDelta
 
-	a.b.padToByte() // TODO: pad, align to next byte
+	a.b.padToByte()
 }
 
 func bitRange(x int64, nbits uint8) bool {
@@ -374,7 +346,7 @@ func (it *xorIterator) Next() bool {
 			return false
 		}
 
-		dod = int64(bits)
+		dod = int64(int32(bits))
 	case 0x1f:
 		// added this case to allow append of a new Gorilla series on an existing chunk (restart from t0)
 

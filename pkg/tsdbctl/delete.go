@@ -21,43 +21,41 @@ such restriction.
 package tsdbctl
 
 import (
-	"fmt"
-	"github.com/ghodss/yaml"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 )
 
-type infoCommandeer struct {
+type delCommandeer struct {
 	cmd            *cobra.Command
 	rootCommandeer *RootCommandeer
-	getNames       bool
-	getCount       bool
+	delConfig      bool
+	force          bool
 }
 
-func newInfoCommandeer(rootCommandeer *RootCommandeer) *infoCommandeer {
-	commandeer := &infoCommandeer{
+func newDeleteCommandeer(rootCommandeer *RootCommandeer) *delCommandeer {
+	commandeer := &delCommandeer{
 		rootCommandeer: rootCommandeer,
 	}
 
 	cmd := &cobra.Command{
-		Use:   "info",
-		Short: "return TSDB config",
+		Use:     "del",
+		Short:   "delete a TSDB",
+		Aliases: []string{"delete"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 
 			// initialize params
-			return commandeer.info()
+			return commandeer.delete()
 		},
 	}
 
-	cmd.Flags().BoolVarP(&commandeer.getNames, "names", "n", false, "return metric names")
-	cmd.Flags().BoolVarP(&commandeer.getCount, "metrics", "m", false, "count number metric objects")
-
+	cmd.Flags().BoolVarP(&commandeer.delConfig, "del-config", "d", false, "Delete the TSDB config as well")
+	cmd.Flags().BoolVarP(&commandeer.force, "force", "f", false, "Delete all elements even if some steps fail")
 	commandeer.cmd = cmd
 
 	return commandeer
 }
 
-func (ic *infoCommandeer) info() error {
+func (ic *delCommandeer) delete() error {
 
 	if err := ic.rootCommandeer.initialize(); err != nil {
 		return err
@@ -67,41 +65,9 @@ func (ic *infoCommandeer) info() error {
 		return err
 	}
 
-	dbconfig := ic.rootCommandeer.adapter.GetDBConfig()
-	info, err := yaml.Marshal(dbconfig)
+	err := ic.rootCommandeer.adapter.DeleteDB(ic.delConfig, ic.force)
 	if err != nil {
-		return errors.Wrap(err, "Failed to get config")
-	}
-
-	fmt.Println("TSDB Configuration:")
-	fmt.Println(string(info))
-
-	if ic.getNames {
-		// create a querier
-		qry, err := ic.rootCommandeer.adapter.Querier(nil, 0, 0)
-		if err != nil {
-			return errors.Wrap(err, "Failed to create querier")
-		}
-
-		// get all metric names
-		names, err := qry.LabelValues("")
-		if err != nil {
-			return errors.Wrap(err, "Failed to get labels")
-		}
-
-		fmt.Println("Metric Names:")
-		for _, name := range names {
-			fmt.Println(name)
-		}
-	}
-
-	if ic.getCount {
-		count, err := ic.rootCommandeer.adapter.CountMetrics("")
-		if err != nil {
-			return errors.Wrap(err, "Failed to count")
-		}
-
-		fmt.Println("Number of objects: ", count)
+		return errors.Wrap(err, "Failed to delete DB")
 	}
 
 	return nil

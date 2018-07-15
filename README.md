@@ -1,7 +1,9 @@
+[![Build Status](https://travis-ci.org/v3io/v3io-tsdb.svg?branch=master)](https://travis-ci.org/v3io/v3io-tsdb)
+
 # V3IO-TSDB
 iguazio API lib for time-series DB access and Prometheus TSDB storage driver. 
 
-> Note: This project is still under development, it requiers the latest 1.7 release of iguazio DB (with Blob functions)
+> Note: This project is still under development, it requires the latest 1.7 release of iguazio DB (with Blob functions)
 
 ## Overview
 iguazio provides a real-time flexible document database engine which accelerates popular BigData and open-source 
@@ -13,9 +15,9 @@ a unique low-level design with highly parallel processing and OS bypass which tr
 iguazio DB low-level APIs (v3io) has rich API semantics and multiple indexing types, those allow it to run multiple
 workloads and processing engines on exactly the same data, and consistently read/write the data in different tools.
 
-This project uses v3io semantics (row & col layouts, arrays, random & sequential indexes, etc.) to provide extreamly
+This project uses v3io semantics (row & col layouts, arrays, random & sequential indexes, etc.) to provide extremely 
 fast and scalable Time Series database engine which can be accessed simultaneously by multiple engines and APIs, such as:
-- Prometheus TimeSeries DB (for metrics scraping & queries)
+- [Prometheus](https://prometheus.io/) Time Series DB (for metrics scraping & queries)
 - [nuclio](https://github.com/nuclio/nuclio) serverless functions (for real-time ingestion, stream processing or queries) 
 - iguazio DynamoDB API (with extensions) 
 - Apache Presto & Spark (future item, for SQL & AI)
@@ -23,8 +25,8 @@ fast and scalable Time Series database engine which can be accessed simultaneous
 
 [nuclio](https://github.com/nuclio/nuclio) supports HTTP and a large variety of streaming/triggering options (Kafka, Kinesis
 , Azure event-hub, RabbitMQ, NATS, iguazio streams, MQTT, Cron tasks), it provides automatic deployment and auto-scaling 
-enabeling ingestion from variety of sources at endless scalability. using nuclio functions can be customized to pre-process 
-incoming data e.g. examin metric data, alert, convert formarts, etc.  
+enabling ingestion from variety of sources at endless scalability. using nuclio functions can be customized to pre-process 
+incoming data e.g. examine metric data, alert, convert formats, etc.  
 
 <br>
 
@@ -36,8 +38,10 @@ The solution stores the raw data in highly compressed column chunks (using Goril
 chunk for every n hours (1hr default), queries will only retrieve and decompress the specific columns based on the 
 requested time range. 
 
-Users can define pre-aggregates (count, avg, sum, min, max, stddev, stdvar) which use v3io update expressions and store
+Users can define pre-aggregates (count, avg, sum, min, max, stddev, stdvar, last, rate) which use v3io update expressions and store
 data consistently in arrays per user defined intervals (RollupMin) and/or dimensions (labels). 
+
+![data layout](dataorg.png)
 
 High-resolution queries will detect the pre-aggregates automatically and selectively access the array ranges 
 (skip chunk retrieval, decompression, and aggregation) which significantly accelerate searches and provide real-time 
@@ -60,7 +64,7 @@ link latency.
 
 ## How To Use  
 
-the code is separated to prometheus complient adapter in [/promtsdb](promtsdb) and more generic/advanced adapter in 
+the code is separated to Prometheus compliant adapter in [/promtsdb](promtsdb) and more generic/advanced adapter in 
 [/pkg/tsdb](pkg/tsdb), you should use the later for custom functions and code. see a full usage example in 
 [v3iotsdb_test.go](/pkg/tsdb/v3iotsdb_test.go), both have similar semantics.
 
@@ -77,11 +81,17 @@ A user can run the CLI to add (append) or query the DB, to use the CLI, build th
 it has built-in help, see the following add/query examples:
 
 ```
-	# display all the CPU metrics for win servers from the last hours 
-	tsdbctl query "__name__=='cpu' and os=='win" -l 1h
+	# create a DB with some aggregates (at 30 min interval) 
+	tsdbctl create -p <path> -r count,sum,max -i 30
 
-	# append a sample (73) to the specified metric at the current time
-	tsdbctl add '{"__name__":"cpu","os":"win","node":"xyz123"}' -d 73
+	# display DB info with metric names (types) 
+	tsdbctl info -n
+
+	# display all the CPU metrics for win servers from the last hours, in CSV format 
+	tsdbctl query cpu -f "os=='win'" -l 1h -o csv
+
+	# append a sample (73.2) to the specified metric type (cpu) + labels at the current time
+	tsdbctl add cpu os=win,node=xyz123 -d 73.2
 ```
 
 For use with nuclio function you can see function example under [\nuclio](nuclio)
@@ -124,9 +134,11 @@ options in [config](config/config.go), a minimal configuration looks like:
 v3ioUrl: "v3io address:port"
 container: "tsdb"
 path: "metrics"
+username: "<username>"
+password: "<password>"
 ```
 
-example of creating an adpapter:
+example of creating an adapter:
 
 ```go
 	// create configuration object from file
@@ -156,10 +168,10 @@ Example:
 		panic(err)
 	}
 
-	// create metrics labels, `__name__` lable specify the metric name (e.g. cpu, temperature, ..), the other labels can be
-	// used in searches (filtering or grouping) or aggregations  
-	lset := utils.Labels{utils.Label{Name: "__name__", Value: "http_req"},
-		utils.Label{Name: "method", Value: "post"}}
+	// create metrics labels, `__name__` label specify the metric type (e.g. cpu, temperature, ..)
+	// the other labels can be used in searches (filtering or grouping) or aggregations
+	// use utils.FromStrings(s ...string) for string list input or utils.FromMap(m map[string]string) for map input
+	lset := utils.FromStrings("__name__","http_req", "method", "post")
 
 	// Add a sample with current time (in milisec) and the value of 7.9
 	ref, err := appender.Add(lset, time.Now().Unix * 1000, 7.9)
@@ -183,7 +195,8 @@ return a list of series (as an iterator object).
 Every returned series have two interfaces, `Labels()` which returns the series or aggregator labels, and `Iterator()`
 which returns an iterator over the series or aggregator values.
 
-The `Select()` call accepts 3 parameters:
+The `Select()` call accepts 4 parameters:
+* name (string) - optional, metric type (e.g. cpu, memory, ..), specifying it accelerate performance (use range queries)   
 * functions (string) - optional, a comma separated list of aggregation functions e.g. `"count,sum,avg,stddev"`
 * step (int64) - optional, the step interval used for the aggregation functions in milisec 
 * filter (string) - V3IO GetItems filter string for selecting the desired metrics e.g. `__name__=='http_req'`
@@ -209,19 +222,19 @@ creating a querier:
 
 Simple select example (no aggregates):
 ```go
-	set, err := qry.Select("", 0, "__name__=='http_req'")
+	set, err := qry.Select("http_req", "", 0, "method=='post'")
 ```
 
 Select using aggregates:
 
 ```go
-	set, err := qry.Select("count,avg,sum,max", 1000*3600, "__name__=='http_req'")
+	set, err := qry.Select("http_req", "count,avg,sum,max", 1000*3600, "method=='post'")
 ```
 
 Using SelectOverlap (overlapping windows): 
 
 ```go
-	set, err := qry.SelectOverlap("count,avg,sum", 1000*3600, []int{24,6,1}, "__name__=='http_req'")
+	set, err := qry.SelectOverlap("http_req", "count,avg,sum", 1000*3600, []int{24,6,1}, "method=='post'")
 ```
 
 once we obtain a set using one of the methods above we can iterate over the set and the individual series in the following way:

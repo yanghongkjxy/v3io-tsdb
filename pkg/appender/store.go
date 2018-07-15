@@ -128,7 +128,7 @@ func (cs *chunkStore) GetState() storeState {
 
 // return the DB path for storing the metric
 func (cs *chunkStore) GetMetricPath(metric *MetricState, tablePath string) string {
-	return fmt.Sprintf("%s/%s.%016x", tablePath, metric.name, metric.hash) // TODO: use TableID
+	return fmt.Sprintf("%s%s.%016x", tablePath, metric.name, metric.hash) // TODO: use TableID
 }
 
 // Read (Async) the current chunk state and data from the storage, used in the first chunk access
@@ -214,7 +214,7 @@ func (cs *chunkStore) ProcessGetResp(mc *MetricsCache, metric *MetricState, resp
 // Append data to the right chunk and table based on the time and state
 func (cs *chunkStore) Append(t int64, v interface{}) {
 
-	cs.pending = append(cs.pending, pendingData{t: t, v: v}) // TODO make it prime option
+	cs.pending = append(cs.pending, pendingData{t: t, v: v})
 
 }
 
@@ -311,7 +311,7 @@ func (cs *chunkStore) WriteChunks(mc *MetricsCache, metric *MetricState) error {
 		}
 
 		// add value to aggregators
-		cs.aggrList.Aggregate(cs.pending[i].v.(float64)) // TODO only do aggr for float types
+		cs.aggrList.Aggregate(t, cs.pending[i].v)
 
 		// add value to compressed raw value chunk
 		activeChunk.appendAttr(t, cs.pending[i].v.(float64))
